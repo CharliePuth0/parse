@@ -1,0 +1,50 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug"  # debug, release
+
+neo4j:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "password"
+  database: "neo4j"
+
+analyzer:
+  max_depth: 10  # 最大调用链深度
+  timeout: 300   # 分析超时时间(秒)
+  workers: 4     # 并发工作协程数
+
+risk:
+  complexity_weight: 0.3    # 复杂度权重
+  impact_weight: 0.4        # 影响面权重
+  history_weight: 0.2       # 历史风险权重
+  feature_weight: 0.1       # 特征风险权重
+  
+  # 风险等级阈值
+  thresholds:
+    low: 30
+    medium: 60
+    high: 80
+
+features:
+  # 启用的特征检测器
+  enabled:
+    - goroutine_leak
+    - resource_leak
+    - nil_pointer
+    - race_condition
+    - error_ignore
+    - panic_uncaught
+    - interface_change
+    - dependency_change
+
+logging:
+  level: "info"  # debug, info, warn, error
+  file: "logs/app.log"
+  max_size: 100  # MB
+  max_backups: 3
+  max_age: 28    # days
+
+cache:
+  enabled: true
+  ttl: 3600      # 缓存时间(秒)
