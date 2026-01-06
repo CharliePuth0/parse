@@ -18,6 +18,7 @@ type Evaluator struct {
 	callGraphBuilder   *callgraph.Builder
 	impactAnalyzer     *impact.Analyzer
 	config             *EvaluatorConfig
+	progressCallback   func(current, total int, message string) // 进度回调
 }
 
 // EvaluatorConfig 评估器配置
@@ -67,6 +68,11 @@ func DefaultConfig() *EvaluatorConfig {
 	return config
 }
 
+// SetProgressCallback 设置进度回调函数
+func (e *Evaluator) SetProgressCallback(callback func(current, total int, message string)) {
+	e.progressCallback = callback
+}
+
 // Evaluate 评估风险
 func (e *Evaluator) Evaluate(taskID string, changes []*models.ChangeFile, callGraph *callgraph.Builder) (*models.RiskReport, error) {
 	report := &models.RiskReport{
@@ -81,9 +87,16 @@ func (e *Evaluator) Evaluate(taskID string, changes []*models.ChangeFile, callGr
 
 	e.callGraphBuilder = callGraph
 
+	// 计算总函数数量，用于进度计算
+	totalFuncs := 0
+	for _, changeFile := range changes {
+		totalFuncs += len(changeFile.Functions)
+	}
+
 	// 评估每个变更文件
 	totalComplexity := 0
 	totalImpact := 0
+	processedFuncs := 0
 
 	for _, changeFile := range changes {
 		fileRisk := e.evaluateFile(changeFile)
@@ -91,6 +104,15 @@ func (e *Evaluator) Evaluate(taskID string, changes []*models.ChangeFile, callGr
 
 		// 评估每个变更函数
 		for _, changeFunc := range changeFile.Functions {
+			processedFuncs++
+
+			// 更新进度
+			if e.progressCallback != nil {
+				message := fmt.Sprintf("正在分析函数: %s.%s (%d/%d)",
+					changeFile.Package, changeFunc.Name, processedFuncs, totalFuncs)
+				e.progressCallback(processedFuncs, totalFuncs, message)
+			}
+
 			funcRisk := e.evaluateFunction(changeFunc, changeFile)
 			report.Functions = append(report.Functions, funcRisk)
 

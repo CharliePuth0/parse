@@ -8,6 +8,7 @@ import (
 
 	"github.com/sugerdaddy/go-code-risk-analyzer/pkg/models"
 	"golang.org/x/tools/go/callgraph"
+
 	// "golang.org/x/tools/go/callgraph/cha"  // 预留用于更精确的分析
 	"golang.org/x/tools/go/callgraph/static"
 	"golang.org/x/tools/go/packages"
@@ -17,15 +18,19 @@ import (
 
 // Builder 调用图构建器
 type Builder struct {
-	packages  map[string]*packages.Package
-	callGraph *callgraph.Graph
-	prog      *ssa.Program
+	packages     map[string]*packages.Package
+	callGraph    *callgraph.Graph
+	prog         *ssa.Program
+	callersCache map[string][]string // 调用者缓存，提高查询性能
+	calleesCache map[string][]string // 被调用者缓存
 }
 
 // NewBuilder 创建调用图构建器
 func NewBuilder() *Builder {
 	return &Builder{
-		packages: make(map[string]*packages.Package),
+		packages:     make(map[string]*packages.Package),
+		callersCache: make(map[string][]string),
+		calleesCache: make(map[string][]string),
 	}
 }
 
@@ -42,7 +47,29 @@ func (b *Builder) LoadPackage(pkgPath string) error {
 			packages.NeedTypesInfo,
 	}
 
-	pkgs, err := packages.Load(cfg, pkgPath)
+	// Handle recursive loading
+	pattern := pkgPath
+	if strings.HasSuffix(pkgPath, "/...") {
+		dir := strings.TrimSuffix(pkgPath, "/...")
+		cfg.Dir = dir
+		pattern = "./..."
+	}
+
+	pkgs, err := packages.Load(cfg, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to load package: %w", err)
+	}
+
+	for _, pkg := range pkgs {
+		b.packages[pkg.PkgPath] = pkg
+	}
+
+	return nil
+}
+
+// LoadPackageWithConfig 使用自定义配置加载包
+func (b *Builder) LoadPackageWithConfig(cfg *packages.Config, pattern string) error {
+	pkgs, err := packages.Load(cfg, pattern)
 	if err != nil {
 		return fmt.Errorf("failed to load package: %w", err)
 	}
@@ -73,7 +100,15 @@ func (b *Builder) Build() error {
 	// 也可以使用CHA算法(更精确但更慢)
 	// b.callGraph = cha.CallGraph(prog)
 
+	// 预热缓存：构建索引（可选）
+	// b.buildCache()
+
 	return nil
+}
+
+// GetPackages 获取加载的包
+func (b *Builder) GetPackages() map[string]*packages.Package {
+	return b.packages
 }
 
 // GetCallRelations 获取调用关系
@@ -130,6 +165,13 @@ func (b *Builder) getFunctionName(fn *ssa.Function) string {
 			// 方法
 			recv := fn.Signature.Recv().Type().String()
 			recv = strings.TrimPrefix(recv, "*")
+			// 移除接收者类型中的包路径，只保留类型名
+			// 例如："crypto/md5.digest" -> "digest"
+			if lastDot := strings.LastIndex(recv, "."); lastDot != -1 {
+				recv = recv[lastDot+1:]
+			} else if lastSlash := strings.LastIndex(recv, "/"); lastSlash != -1 {
+				recv = recv[lastSlash+1:]
+			}
 			return fmt.Sprintf("%s.%s.%s", pkg, recv, fn.Name())
 		}
 		// 函数
@@ -173,25 +215,41 @@ func (b *Builder) FindCallers(funcName string) []string {
 		return nil
 	}
 
+	// 首先尝试从缓存获取
+	if callers, ok := b.callersCache[funcName]; ok {
+		return callers
+	}
+
+	// 如果缓存没有，进行查找（使用精确匹配）
 	callers := make([]string, 0)
+	visited := make(map[string]bool)
 
 	for _, node := range b.callGraph.Nodes {
 		if node.Func == nil {
 			continue
 		}
 
+		// 检查该节点是否调用了目标函数
 		for _, edge := range node.Out {
 			if edge.Callee.Func == nil {
 				continue
 			}
 
 			callee := b.getFunctionName(edge.Callee.Func)
-			if strings.Contains(callee, funcName) {
+
+			// 使用精确匹配或后缀匹配（支持简短名称）
+			if callee == funcName || strings.HasSuffix(callee, "."+funcName) {
 				caller := b.getFunctionName(node.Func)
-				callers = append(callers, caller)
+				if !visited[caller] {
+					visited[caller] = true
+					callers = append(callers, caller)
+				}
 			}
 		}
 	}
+
+	// 缓存结果
+	b.callersCache[funcName] = callers
 
 	return callers
 }
@@ -202,7 +260,13 @@ func (b *Builder) FindCallees(funcName string) []string {
 		return nil
 	}
 
+	// 首先尝试从缓存获取
+	if callees, ok := b.calleesCache[funcName]; ok {
+		return callees
+	}
+
 	callees := make([]string, 0)
+	visited := make(map[string]bool)
 
 	for _, node := range b.callGraph.Nodes {
 		if node.Func == nil {
@@ -210,7 +274,9 @@ func (b *Builder) FindCallees(funcName string) []string {
 		}
 
 		caller := b.getFunctionName(node.Func)
-		if !strings.Contains(caller, funcName) {
+
+		// 使用精确匹配或后缀匹配
+		if caller != funcName && !strings.HasSuffix(caller, "."+funcName) {
 			continue
 		}
 
@@ -220,9 +286,15 @@ func (b *Builder) FindCallees(funcName string) []string {
 			}
 
 			callee := b.getFunctionName(edge.Callee.Func)
-			callees = append(callees, callee)
+			if !visited[callee] {
+				visited[callee] = true
+				callees = append(callees, callee)
+			}
 		}
 	}
+
+	// 缓存结果
+	b.calleesCache[funcName] = callees
 
 	return callees
 }

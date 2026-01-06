@@ -1,25 +1,106 @@
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@import "tailwindcss";
+
+@theme {
+    --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+
+    --color-brand-50: #f0f9ff;
+    --color-brand-100: #e0f2fe;
+    --color-brand-200: #bae6fd;
+    --color-brand-300: #7dd3fc;
+    --color-brand-400: #38bdf8;
+    --color-brand-500: #0ea5e9;
+    --color-brand-600: #0284c7;
+    --color-brand-700: #0369a1;
+    --color-brand-800: #075985;
+    --color-brand-900: #0c4a6e;
+    --color-brand-950: #082f49;
+
+    --color-slate-850: #1e293b;
+
+    --shadow-glow: 0 0 20px rgba(14, 165, 233, 0.3);
+    --shadow-card: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    --shadow-card-hover: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+    --animate-fade-in: fadeIn 0.5s ease-out;
+    --animate-slide-up: slideUp 0.5s ease-out;
+
+    @keyframes fadeIn {
+        0% {
+            opacity: 0;
+        }
+
+        100% {
+            opacity: 1;
+        }
+    }
+
+    @keyframes slideUp {
+        0% {
+            transform: translateY(20px);
+            opacity: 0;
+        }
+
+        100% {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    }
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+@layer base {
+    :root {
+        --background: 255 255 255;
+        --foreground: 15 23 42;
+    }
+
+    body {
+        @apply antialiased text-slate-900 bg-slate-50;
+        font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    }
 }
 
-* {
-  box-sizing: border-box;
+@layer components {
+    .btn-primary {
+        @apply px-4 py-2 bg-brand-600 text-white rounded-lg font-medium transition-all duration-200 hover:bg-brand-700 hover:shadow-lg hover:shadow-brand-500/30 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+    }
+
+    .btn-secondary {
+        @apply px-4 py-2 bg-white text-slate-700 border border-slate-200 rounded-lg font-medium transition-all duration-200 hover:bg-slate-50 hover:border-slate-300 active:scale-95;
+    }
+
+    .card {
+        @apply bg-white rounded-xl border border-slate-100 shadow-card hover:shadow-card-hover transition-all duration-300;
+    }
+
+    .input-field {
+        @apply w-full px-4 py-2.5 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all;
+    }
 }
 
-.ant-layout-header {
-  padding: 0 50px !important;
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
 }
 
-.ant-table-expanded-row > .ant-table-cell {
-  background-color: #fafafa !important;
+::-webkit-scrollbar-track {
+    @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    @apply bg-slate-200 rounded-full hover:bg-slate-300 transition-colors;
+}
+
+/* React Flow Customization */
+.react-flow__node {
+    @apply font-sans;
+}
+
+.react-flow__controls {
+    @apply shadow-card border border-slate-100 rounded-lg overflow-hidden;
+}
+
+.react-flow__controls-button {
+    @apply bg-white border-b border-slate-100 text-slate-600 hover:bg-slate-50 hover:text-brand-600;
 }

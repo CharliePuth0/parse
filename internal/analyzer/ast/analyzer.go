@@ -410,6 +410,39 @@ func (a *Analyzer) FindChangedFunctions(file *ast.File, changedLines map[int]boo
 	return changedFuncs
 }
 
+// ExtractAllFunctions 提取文件中所有函数（不区分是否变更）
+func (a *Analyzer) ExtractAllFunctions(file *ast.File) []*models.ChangeFunc {
+	allFuncs := make([]*models.ChangeFunc, 0)
+
+	for _, decl := range file.Decls {
+		if funcDecl, ok := decl.(*ast.FuncDecl); ok {
+			startLine := a.fset.Position(funcDecl.Pos()).Line
+			endLine := a.fset.Position(funcDecl.End()).Line
+
+			changeFunc := &models.ChangeFunc{
+				Name:       funcDecl.Name.Name,
+				StartLine:  startLine,
+				EndLine:    endLine,
+				IsModified: true, // 假设都是变更的
+				Complexity: a.calculateComplexity(funcDecl),
+				Calls:      a.FindFunctionCalls(funcDecl),
+			}
+
+			// 提取签名
+			changeFunc.Signature = a.generateFuncSignature(funcDecl)
+
+			// 接收者类型
+			if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
+				changeFunc.ReceiverType = a.typeToString(funcDecl.Recv.List[0].Type)
+			}
+
+			allFuncs = append(allFuncs, changeFunc)
+		}
+	}
+
+	return allFuncs
+}
+
 // AnalyzePackageDir 分析包目录
 func (a *Analyzer) AnalyzePackageDir(dir string) (map[string]*ast.File, error) {
 	pkgs, err := parser.ParseDir(a.fset, dir, nil, parser.ParseComments)

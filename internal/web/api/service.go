@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"os"
+
 	"github.com/sugerdaddy/go-code-risk-analyzer/internal/analyzer/ast"
 	"github.com/sugerdaddy/go-code-risk-analyzer/internal/analyzer/callgraph"
 	"github.com/sugerdaddy/go-code-risk-analyzer/internal/git"
@@ -14,6 +16,7 @@ import (
 	"github.com/sugerdaddy/go-code-risk-analyzer/internal/risk/feature"
 	"github.com/sugerdaddy/go-code-risk-analyzer/internal/storage/graph"
 	"github.com/sugerdaddy/go-code-risk-analyzer/pkg/models"
+	"golang.org/x/tools/go/packages"
 )
 
 // Service 分析服务
@@ -111,7 +114,7 @@ func (s *Service) GetFullCallGraph(taskID string) (map[string]interface{}, error
 	relations, ok := s.callGraphs[taskID]
 	s.mu.RUnlock()
 
-	if !ok || len(relations) == 0 {
+	if !ok {
 		// 如果没有缓存，返回空结果
 		return map[string]interface{}{
 			"task_id":         taskID,
@@ -175,13 +178,17 @@ func (s *Service) GetFullCallGraph(taskID string) (map[string]interface{}, error
 
 // executeAnalysis 执行分析
 func (s *Service) executeAnalysis(task *models.AnalysisTask) {
-	ctx := context.Background()
+	// 设置 10 分钟超时
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
 	// 更新状态
 	s.updateTaskStatus(task.ID, "running", 0, "")
 
+	// 添加 defer recover 捕获 panic
 	defer func() {
 		if r := recover(); r != nil {
+			fmt.Printf("Panic in task %s: %v\n", task.ID, r)
 			s.updateTaskStatus(task.ID, "failed", 0, fmt.Sprintf("panic: %v", r))
 		}
 	}()
@@ -208,8 +215,28 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 	allFeatures := make([]*models.FeatureRisk, 0)
 
 	for _, changeFile := range changes {
+		// 检查上下文是否已取消（超时）
+		select {
+		case <-ctx.Done():
+			s.updateTaskStatus(task.ID, "failed", 0, "analysis timed out or cancelled")
+			return
+		default:
+		}
+
+		// Skip deleted files
+		if changeFile.Type == "deleted" {
+			continue
+		}
+
 		// 解析文件
 		filePath := gitAnalyzer.GetAbsolutePath(changeFile.Path)
+
+		// Check if file exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			fmt.Printf("Warning: file %s not found under %s, skipping AST parse\n", filePath, task.RepoPath)
+			continue
+		}
+
 		file, err := astAnalyzer.ParseFile(filePath)
 		if err != nil {
 			fmt.Printf("Warning: failed to parse file %s: %v\n", changeFile.Path, err)
@@ -224,10 +251,8 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 		// 提取导入
 		changeFile.Imports = astAnalyzer.ExtractImports(file)
 
-		// 查找变更函数
-		changedLines := make(map[int]bool)
-		// 简化:假设所有函数都变更了
-		changeFile.Functions = astAnalyzer.FindChangedFunctions(file, changedLines)
+		// 查找所有函数（简化：假设文件中所有函数都变更了）
+		changeFile.Functions = astAnalyzer.ExtractAllFunctions(file)
 
 		// 特征检测 - 使用token.FileSet
 		fset := token.NewFileSet()
@@ -239,8 +264,21 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 	s.updateTaskProgress(task.ID, 50)
 	callGraphBuilder := callgraph.NewBuilder()
 
-	// 加载包
-	err = callGraphBuilder.LoadPackage(task.RepoPath)
+	// 加载仓库中的所有包
+	// 使用相对路径模式 ./... 并设置工作目录为仓库路径
+	cfg := &packages.Config{
+		Dir: task.RepoPath, // 设置工作目录为仓库路径
+		Mode: packages.NeedName |
+			packages.NeedFiles |
+			packages.NeedCompiledGoFiles |
+			packages.NeedImports |
+			packages.NeedDeps |
+			packages.NeedTypes |
+			packages.NeedSyntax |
+			packages.NeedTypesInfo,
+	}
+
+	err = callGraphBuilder.LoadPackageWithConfig(cfg, "./...")
 	if err != nil {
 		fmt.Printf("Warning: failed to load package: %v\n", err)
 	} else {
@@ -253,6 +291,17 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 
 	// 4. 风险评估
 	s.updateTaskProgress(task.ID, 70)
+
+	// 设置进度回调，实时更新进度（70%-90%）
+	s.evaluator.SetProgressCallback(func(current, total int, message string) {
+		if total > 0 {
+			// 将函数分析进度映射到70-90%范围
+			progress := 70 + int(float64(current)/float64(total)*20)
+			s.updateTaskProgress(task.ID, progress)
+			fmt.Printf("Task %s: %s\n", task.ID, message)
+		}
+	})
+
 	report, err := s.evaluator.EvaluateWithContext(
 		task.ID,
 		changes,
@@ -276,6 +325,16 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 
 	// 6. 保存到图数据库(可选)
 	if s.graphStore != nil {
+		// 构建文件到包路径的映射
+		fileToPkg := make(map[string]string)
+		if callGraphBuilder != nil {
+			for _, pkg := range callGraphBuilder.GetPackages() {
+				for _, goFile := range pkg.GoFiles {
+					fileToPkg[goFile] = pkg.PkgPath
+				}
+			}
+		}
+
 		// 保存符号
 		for _, changeFile := range changes {
 			filePath := gitAnalyzer.GetAbsolutePath(changeFile.Path)
@@ -284,20 +343,36 @@ func (s *Service) executeAnalysis(task *models.AnalysisTask) {
 				continue
 			}
 
+			// 尝试获取全限定包路径
+			pkgPath := changeFile.Package
+			if fullPath, ok := fileToPkg[filePath]; ok {
+				pkgPath = fullPath
+			}
+
 			symbols, err := astAnalyzer.ExtractSymbols(file, filePath)
 			if err != nil {
 				continue
 			}
 
 			for _, symbol := range symbols {
+				// 更新符号的包名为全路径
+				symbol.Package = pkgPath
+				// 重新生成 FullName
+				if symbol.Type == "method" {
+					symbol.FullName = fmt.Sprintf("%s.%s.%s", pkgPath, symbol.ReceiverType, symbol.Name)
+				} else {
+					symbol.FullName = fmt.Sprintf("%s.%s", pkgPath, symbol.Name)
+				}
 				_ = s.graphStore.SaveSymbol(ctx, symbol)
 			}
 		}
 
 		// 保存调用关系
-		relations := callGraphBuilder.GetCallRelations()
-		for _, relation := range relations {
-			_ = s.graphStore.SaveCallRelation(ctx, relation)
+		if callGraphBuilder != nil {
+			relations := callGraphBuilder.GetCallRelations()
+			for _, relation := range relations {
+				_ = s.graphStore.SaveCallRelation(ctx, relation)
+			}
 		}
 	}
 

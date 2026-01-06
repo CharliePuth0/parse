@@ -29,7 +29,7 @@ func main() {
 
 	// 初始化图数据库
 	var graphStore *graph.Store
-	if false && cfg.Neo4j.URI != "" {  // 暂时禁用Neo4j
+	if cfg.Neo4j.URI != "" { // 启用Neo4j
 		graphConfig := &graph.Config{
 			URI:      cfg.Neo4j.URI,
 			Username: cfg.Neo4j.Username,
@@ -89,6 +89,17 @@ func main() {
 	// 注册API路由
 	h := handler.NewHandler(service)
 	h.RegisterRoutes(router)
+
+	// SPA路由 - 对于所有未匹配的路由，返回index.html
+	router.NoRoute(func(c *gin.Context) {
+		// 如果请求路径以/api开头，返回404
+		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
+			c.JSON(404, gin.H{"error": "API endpoint not found"})
+			return
+		}
+		// 其他路径返回index.html，让前端路由处理
+		c.File("./web/dist/index.html")
+	})
 
 	// 启动服务器
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

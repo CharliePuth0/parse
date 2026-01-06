@@ -215,10 +215,10 @@ func (s *Store) GetImpactGraph(ctx context.Context, funcName string, maxDepth in
 	query := fmt.Sprintf(`
 		MATCH (target:Symbol {full_name: $func_name})
 		OPTIONAL MATCH path = (caller:Symbol)-[:CALLS*1..%d]->(target)
-		WITH collect(nodes(path)) as paths, target
-		UNWIND paths as path_nodes
-		UNWIND path_nodes as node
-		WITH collect(DISTINCT node) + target as all_nodes
+		WITH target, path
+		UNWIND nodes(path) as node
+		WITH collect(DISTINCT node) as other_nodes, target
+		WITH other_nodes + [target] as all_nodes
 		UNWIND all_nodes as n
 		OPTIONAL MATCH (n)-[r:CALLS]->(m)
 		WHERE m IN all_nodes
