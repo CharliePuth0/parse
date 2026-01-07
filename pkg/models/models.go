@@ -100,6 +100,27 @@ type RiskSummary struct {
 	ScoreBreakdown *ScoreBreakdown `json:"score_breakdown"`
 }
 
+// Repository 代码仓库
+type Repository struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// BranchComparison 分支对比记录
+type BranchComparison struct {
+	ID            string    `json:"id"`
+	RepoName      string    `json:"repo_name"`
+	BaseBranch    string    `json:"base_branch"`
+	TargetBranch  string    `json:"target_branch"`
+	BaseCommit    string    `json:"base_commit"`
+	TargetCommit  string    `json:"target_commit"`
+	AnalyzedAt    time.Time `json:"analyzed_at"`
+	ConflictCount int       `json:"conflict_count"`
+	DiffFileCount int       `json:"diff_file_count"`
+	RiskScore     float64   `json:"risk_score"`
+	RiskLevel     string    `json:"risk_level"`
+}
+
 // ScoreBreakdown 分数分解
 type ScoreBreakdown struct {
 	ComplexityScore float64 `json:"complexity_score"`

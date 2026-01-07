@@ -381,7 +381,15 @@ const createDisplayNode = (treeNode) => {
 export const transformCallGraphData = (apiData) => {
     if (!apiData || !apiData.nodes) return { tree: null, rawEdges: [] };
     const { root, functionMap } = buildPackageTree(apiData.nodes);
-    return { tree: { root, functionMap }, rawEdges: apiData.edges };
+
+    // Map backend 'from/to' to frontend 'source/target'
+    const rawEdges = (apiData.edges || []).map(edge => ({
+        ...edge,
+        source: edge.from || edge.source,
+        target: edge.to || edge.target
+    }));
+
+    return { tree: { root, functionMap }, rawEdges };
 };
 
 // Format date

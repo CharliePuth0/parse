@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/sugerdaddy/go-code-risk-analyzer/pkg/models"
@@ -365,6 +366,8 @@ func (s *Store) CreateIndexes(ctx context.Context) error {
 		"CREATE INDEX symbol_name IF NOT EXISTS FOR (s:Symbol) ON (s.name)",
 		"CREATE INDEX symbol_package IF NOT EXISTS FOR (s:Symbol) ON (s.package)",
 		"CREATE INDEX package_name IF NOT EXISTS FOR (p:Package) ON (p.name)",
+		"CREATE INDEX repository_name IF NOT EXISTS FOR (r:Repository) ON (r.name)",
+		"CREATE INDEX branch_name_repo IF NOT EXISTS FOR (b:Branch) ON (b.name, b.repo)",
 	}
 
 	for _, index := range indexes {
@@ -415,6 +418,205 @@ func (s *Store) BatchSaveSymbols(ctx context.Context, symbols []*models.Symbol) 
 		return nil, err
 	})
 	return err
+}
+
+// SaveRepository 保存仓库信息
+func (s *Store) SaveRepository(ctx context.Context, repo *models.Repository) error {
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: s.config.Database,
+	})
+	defer session.Close(ctx)
+
+	query := `
+		MERGE (r:Repository {name: $name})
+		SET r.url = $url, r.updated_at = datetime()
+	`
+
+	_, err := session.Run(ctx, query, map[string]interface{}{
+		"name": repo.Name,
+		"url":  repo.URL,
+	})
+	return err
+}
+
+// SaveBranchComparison 保存分支对比记录
+func (s *Store) SaveBranchComparison(ctx context.Context, comp *models.BranchComparison) error {
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: s.config.Database,
+	})
+	defer session.Close(ctx)
+
+	query := `
+		MERGE (r:Repository {name: $repo_name})
+		MERGE (b1:Branch {name: $base_branch, repo: $repo_name})
+		MERGE (b2:Branch {name: $target_branch, repo: $repo_name})
+		MERGE (r)-[:HAS_BRANCH]->(b1)
+		MERGE (r)-[:HAS_BRANCH]->(b2)
+		CREATE (b2)-[c:COMPARED_WITH]->(b1)
+		SET c.id = $id,
+		    c.base_commit = $base_commit,
+		    c.target_commit = $target_commit,
+		    c.analyzed_at = datetime($analyzed_at),
+		    c.conflict_count = $conflict_count,
+		    c.diff_file_count = $diff_file_count,
+		    c.risk_score = $risk_score,
+		    c.risk_level = $risk_level
+	`
+
+	params := map[string]interface{}{
+		"repo_name":       comp.RepoName,
+		"base_branch":     comp.BaseBranch,
+		"target_branch":   comp.TargetBranch,
+		"id":              comp.ID,
+		"base_commit":     comp.BaseCommit,
+		"target_commit":   comp.TargetCommit,
+		"analyzed_at":     comp.AnalyzedAt.Format(time.RFC3339),
+		"conflict_count":  comp.ConflictCount,
+		"diff_file_count": comp.DiffFileCount,
+		"risk_score":      comp.RiskScore,
+		"risk_level":      comp.RiskLevel,
+	}
+
+	_, err := session.Run(ctx, query, params)
+	return err
+}
+
+// GetLatestBranchComparison 获取最新的分支对比记录
+func (s *Store) GetLatestBranchComparison(ctx context.Context, repoName, baseBranch, targetBranch string) (*models.BranchComparison, error) {
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: s.config.Database,
+	})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (b2:Branch {name: $target_branch, repo: $repo_name})-[c:COMPARED_WITH]->(b1:Branch {name: $base_branch, repo: $repo_name})
+		RETURN c.id as id, c.base_commit as base_commit, c.target_commit as target_commit, 
+		       toString(c.analyzed_at) as analyzed_at, c.conflict_count as conflict_count,
+		       c.diff_file_count as diff_file_count, c.risk_score as risk_score,
+		       c.risk_level as risk_level
+		ORDER BY c.analyzed_at DESC
+		LIMIT 1
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"repo_name":     repoName,
+		"base_branch":   baseBranch,
+		"target_branch": targetBranch,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if result.Next(ctx) {
+		return s.mapRecordToBranchComparison(result.Record(), repoName, baseBranch, targetBranch), nil
+	}
+
+	return nil, nil
+}
+
+// FindBranchComparisons 查找分支对比历史
+// baseBranch: 目标分支（如 main），如果为空则不限制
+// targetBranch: 源分支（如 feature），如果为空则不限制
+// limit: 返回记录数量限制
+func (s *Store) FindBranchComparisons(ctx context.Context, repoName, baseBranch, targetBranch string, limit int) ([]*models.BranchComparison, error) {
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: s.config.Database,
+	})
+	defer session.Close(ctx)
+
+	// 构建动态查询
+	query := "MATCH (b2:Branch {repo: $repo_name})-[c:COMPARED_WITH]->(b1:Branch {repo: $repo_name}) WHERE 1=1 "
+	params := map[string]interface{}{
+		"repo_name": repoName,
+		"limit":     limit,
+	}
+
+	if baseBranch != "" {
+		query += "AND b1.name = $base_branch "
+		params["base_branch"] = baseBranch
+	}
+	if targetBranch != "" {
+		query += "AND b2.name = $target_branch "
+		params["target_branch"] = targetBranch
+	}
+
+	query += `
+		RETURN c.id as id, c.base_commit as base_commit, c.target_commit as target_commit, 
+		       toString(c.analyzed_at) as analyzed_at, c.conflict_count as conflict_count,
+		       c.diff_file_count as diff_file_count, c.risk_score as risk_score,
+		       c.risk_level as risk_level,
+		       b1.name as base_branch_name,
+		       b2.name as target_branch_name
+		ORDER BY c.analyzed_at DESC
+		LIMIT $limit
+	`
+
+	result, err := session.Run(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+
+	comparisons := make([]*models.BranchComparison, 0)
+	for result.Next(ctx) {
+		record := result.Record()
+
+		// 获取分支名称（如果未指定，从查询结果中获取）
+		currentBase := baseBranch
+		if currentBase == "" {
+			if b, ok := record.Get("base_branch_name"); ok {
+				currentBase = b.(string)
+			}
+		}
+
+		currentTarget := targetBranch
+		if currentTarget == "" {
+			if t, ok := record.Get("target_branch_name"); ok {
+				currentTarget = t.(string)
+			}
+		}
+
+		comp := s.mapRecordToBranchComparison(record, repoName, currentBase, currentTarget)
+		comparisons = append(comparisons, comp)
+	}
+
+	return comparisons, result.Err()
+}
+
+// mapRecordToBranchComparison 将Neo4j记录映射为BranchComparison结构体
+func (s *Store) mapRecordToBranchComparison(record *neo4j.Record, repoName, baseBranch, targetBranch string) *models.BranchComparison {
+	comp := &models.BranchComparison{
+		RepoName:     repoName,
+		BaseBranch:   baseBranch,
+		TargetBranch: targetBranch,
+	}
+
+	if id, ok := record.Get("id"); ok && id != nil {
+		comp.ID = id.(string)
+	}
+	if bc, ok := record.Get("base_commit"); ok && bc != nil {
+		comp.BaseCommit = bc.(string)
+	}
+	if tc, ok := record.Get("target_commit"); ok && tc != nil {
+		comp.TargetCommit = tc.(string)
+	}
+	if at, ok := record.Get("analyzed_at"); ok && at != nil {
+		t, _ := time.Parse(time.RFC3339, at.(string))
+		comp.AnalyzedAt = t
+	}
+	if cc, ok := record.Get("conflict_count"); ok && cc != nil {
+		comp.ConflictCount = int(cc.(int64))
+	}
+	if dfc, ok := record.Get("diff_file_count"); ok && dfc != nil {
+		comp.DiffFileCount = int(dfc.(int64))
+	}
+	if rs, ok := record.Get("risk_score"); ok && rs != nil {
+		comp.RiskScore = rs.(float64)
+	}
+	if rl, ok := record.Get("risk_level"); ok && rl != nil {
+		comp.RiskLevel = rl.(string)
+	}
+
+	return comp
 }
 
 // BatchSaveCallRelations 批量保存调用关系
